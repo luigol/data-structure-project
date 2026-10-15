@@ -1,232 +1,684 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <stddef.h>
 
-#define TAM 256   // quantidade de caracteres possiveis (tabela ASCII estendida)
+#define ALPHABET      256     /* quantidade de bytes possiveis            */
+#define BUF_SIZE      4096    /* tamanho dos buffers de leitura/escrita   */
+#define MAX_TREE_SIZE 8191    /* maximo representavel em 13 bits          */
+#define TREE_BUF_SIZE 1024    /* arvore serializada: no maximo 513 bytes  */
+#define MAX_CODE_LEN  300     /* altura maxima da arvore e 255            */
 
-/* ============ ESTRUTURAS ============ */
-typedef struct no {
-    unsigned char caracter;
-    int frequencia;
-    struct no *esq, *dir, *proximo;
-} No;
+/* Codigos de retorno */
+#define HUFF_OK          0    /* sucesso                              */
+#define HUFF_ERR_IO      1    /* erro ao abrir/ler/gravar arquivo     */
+#define HUFF_ERR_MEM     2    /* memoria insuficiente                 */
+#define HUFF_ERR_FORMAT  3    /* arquivo .huff invalido/corrompido    */
+
+
+/* ===================================================================
+ *  PARTE 1: OPERACOES COM BITS
+ * =================================================================== */
+
+/** Verifica se o bit i (0 a 7) do byte c esta ligado. */
+int is_bit_i_set(unsigned char c, int i)
+{
+    unsigned char mask = 1 << i;
+    return mask & c;
+}
+
+/** Liga o bit i (0 a 7) do byte c e devolve o novo byte. */
+unsigned char set_bit(unsigned char c, int i)
+{
+    unsigned char mask = 1 << i;
+    return mask | c;
+}
+
+
+/* ===================================================================
+ *  PARTE 2: TAD FILA DE PRIORIDADES GENERICA (void *)
+ *  Lista encadeada ordenada; menor prioridade sai primeiro.
+ *  Em empate, o item novo fica ANTES dos que ja estavam (como nos slides).
+ * =================================================================== */
+
+struct pq_node {
+    void *item;
+    uint64_t priority;
+    struct pq_node *next;
+};
 
 typedef struct {
-    No *inicio;
-    int tam;
-} Lista;
+    struct pq_node *head;
+    size_t size;
+} PriorityQueue;
 
-/* ============ PARTE 1: TABELA DE FREQUENCIA ============ */
-void inicializa_tabela_com_zero(unsigned int tab[]) {
-    for (int i = 0; i < TAM; i++)
-        tab[i] = 0;
+/** Cria uma fila vazia. Devolve NULL se faltar memoria. */
+PriorityQueue *pq_create(void)
+{
+    return calloc(1, sizeof(PriorityQueue));
 }
 
-void preenche_tab_frequencia(unsigned char texto[], unsigned int tab[]) {
-    for (int i = 0; texto[i] != '\0'; i++)
-        tab[texto[i]]++;
-}
+/** Insere item com a prioridade dada. Devolve 1 se ok, 0 se faltou memoria. */
+int pq_enqueue(PriorityQueue *pq, void *item, uint64_t priority)
+{
+    struct pq_node *node = malloc(sizeof(struct pq_node));
+    if (!node) return 0;
+    node->item = item;
+    node->priority = priority;
 
-/* ============ PARTE 2: LISTA ENCADEADA ORDENADA (fila de prioridade) ============ */
-void criar_lista(Lista *lista) {
-    lista->inicio = NULL;
-    lista->tam = 0;
-}
-
-void inserir_ordenado(Lista *lista, No *no) {
-    if (lista->inicio == NULL) {                       // lista vazia
-        lista->inicio = no;
-    } else if (no->frequencia < lista->inicio->frequencia) {  // menor que o primeiro
-        no->proximo = lista->inicio;
-        lista->inicio = no;
-    } else {                                           // meio ou fim
-        No *aux = lista->inicio;
-        while (aux->proximo && aux->proximo->frequencia <= no->frequencia)
-            aux = aux->proximo;
-        no->proximo = aux->proximo;
-        aux->proximo = no;
+    if (pq->head == NULL || priority <= pq->head->priority) {
+        node->next = pq->head;
+        pq->head = node;
+    } else {
+        struct pq_node *aux = pq->head;
+        while (aux->next && aux->next->priority < priority)
+            aux = aux->next;
+        node->next = aux->next;
+        aux->next = node;
     }
-    lista->tam++;
+    pq->size++;
+    return 1;
 }
 
-void preencher_lista(unsigned int tab[], Lista *lista) {
-    for (int i = 0; i < TAM; i++) {
-        if (tab[i] > 0) {
-            No *novo = malloc(sizeof(No));
-            if (novo) {
-                novo->caracter = i;
-                novo->frequencia = tab[i];
-                novo->dir = NULL;
-                novo->esq = NULL;
-                novo->proximo = NULL;
-                inserir_ordenado(lista, novo);
-            } else {
-                printf("\tERRO ao alocar memoria em preencher_lista!\n");
-                break;
+/** Remove e devolve o item de menor prioridade (NULL se vazia). */
+void *pq_dequeue(PriorityQueue *pq, uint64_t *priority)
+{
+    if (pq->head == NULL) return NULL;
+    struct pq_node *node = pq->head;
+    void *item = node->item;
+    if (priority) *priority = node->priority;
+    pq->head = node->next;
+    pq->size--;
+    free(node);
+    return item;
+}
+
+/** Quantidade de itens na fila. */
+size_t pq_size(const PriorityQueue *pq)
+{
+    return pq->size;
+}
+
+/** Libera a fila (NAO libera os itens). */
+void pq_destroy(PriorityQueue *pq)
+{
+    struct pq_node *node = pq->head;
+    while (node) {
+        struct pq_node *next = node->next;
+        free(node);
+        node = next;
+    }
+    free(pq);
+}
+
+
+/* ===================================================================
+ *  PARTE 3: TAD ARVORE BINARIA GENERICA (void *)
+ * =================================================================== */
+
+typedef struct bintree {
+    void *item;
+    struct bintree *left;
+    struct bintree *right;
+} BinTree;
+
+/** Cria um no com item e filhos. Devolve NULL se faltar memoria. */
+BinTree *bt_create(void *item, BinTree *left, BinTree *right)
+{
+    BinTree *node = malloc(sizeof(BinTree));
+    if (!node) return NULL;
+    node->item = item;
+    node->left = left;
+    node->right = right;
+    return node;
+}
+
+/** Devolve 1 se o no nao tem filhos (folha). */
+int bt_is_leaf(const BinTree *node)
+{
+    return node->left == NULL && node->right == NULL;
+}
+
+/** Libera a arvore toda. free_item libera o item de cada no (pode ser NULL). */
+void bt_destroy(BinTree *root, void (*free_item)(void *))
+{
+    if (!root) return;
+    bt_destroy(root->left, free_item);
+    bt_destroy(root->right, free_item);
+    if (free_item) free_item(root->item);
+    free(root);
+}
+
+
+/* ===================================================================
+ *  PARTE 4: TAD TABELA GENERICA (vetor de void *)
+ *  Usada como dicionario: indice = byte, valor = codigo "0101..."
+ * =================================================================== */
+
+typedef struct {
+    size_t size;
+    void **slots;
+} Table;
+
+/** Cria tabela com `size` posicoes vazias (NULL). */
+Table *table_create(size_t size)
+{
+    Table *t = malloc(sizeof(Table));
+    if (!t) return NULL;
+    t->slots = calloc(size, sizeof(void *));
+    if (!t->slots) { free(t); return NULL; }
+    t->size = size;
+    return t;
+}
+
+/** Guarda value na posicao index. Devolve 0 se o indice for invalido. */
+int table_put(Table *t, size_t index, void *value)
+{
+    if (index >= t->size) return 0;
+    t->slots[index] = value;
+    return 1;
+}
+
+/** Le a posicao index (NULL se vazia ou invalida). */
+void *table_get(const Table *t, size_t index)
+{
+    if (index >= t->size) return NULL;
+    return t->slots[index];
+}
+
+/** Libera a tabela. free_value libera cada valor nao-NULL (pode ser NULL). */
+void table_destroy(Table *t, void (*free_value)(void *))
+{
+    if (!t) return;
+    if (free_value)
+        for (size_t i = 0; i < t->size; i++)
+            if (t->slots[i]) free_value(t->slots[i]);
+    free(t->slots);
+    free(t);
+}
+
+
+/* ===================================================================
+ *  PARTE 5: CRIACAO DE NOS (itens da arvore sao `unsigned char *`)
+ * =================================================================== */
+
+/* Aloca 1 byte na memoria guardando o valor b. */
+static unsigned char *new_byte(unsigned char b)
+{
+    unsigned char *p = malloc(sizeof(unsigned char));
+    if (p) *p = b;
+    return p;
+}
+
+/* Cria uma folha que guarda o byte b. */
+static BinTree *new_leaf(unsigned char b)
+{
+    unsigned char *item = new_byte(b);
+    if (!item) return NULL;
+    BinTree *node = bt_create(item, NULL, NULL);
+    if (!node) free(item);
+    return node;
+}
+
+/* Cria um no interno ('*') com dois filhos. */
+static BinTree *new_internal(BinTree *left, BinTree *right)
+{
+    unsigned char *item = new_byte('*');
+    if (!item) return NULL;
+    BinTree *node = bt_create(item, left, right);
+    if (!node) free(item);
+    return node;
+}
+
+
+/* ===================================================================
+ *  PARTE 6: FREQUENCIAS E ARVORE DE HUFFMAN
+ * =================================================================== */
+
+/* Le o arquivo inteiro contando quantas vezes cada byte aparece. */
+static int count_frequencies(FILE *in, uint64_t freq[])
+{
+    unsigned char buf[BUF_SIZE];
+    size_t n;
+    while ((n = fread(buf, 1, BUF_SIZE, in)) > 0)
+        for (size_t i = 0; i < n; i++)
+            freq[buf[i]]++;
+    return ferror(in) ? HUFF_ERR_IO : HUFF_OK;
+}
+
+/* Esvazia a fila liberando as arvores que ainda estao nela. */
+static void drain_queue(PriorityQueue *pq)
+{
+    BinTree *t;
+    while ((t = pq_dequeue(pq, NULL)) != NULL)
+        bt_destroy(t, free);
+}
+
+/*
+ * Monta a arvore de Huffman. Devolve a raiz, ou NULL se o arquivo e vazio
+ * (status = HUFF_OK) ou se faltou memoria (status = HUFF_ERR_MEM).
+ */
+static BinTree *build_tree(const uint64_t freq[], int *status)
+{
+    PriorityQueue *pq = pq_create();
+    BinTree *root = NULL;
+    int last_byte = 0;
+
+    *status = HUFF_OK;
+    if (!pq) { *status = HUFF_ERR_MEM; return NULL; }
+
+    /* passo 1: uma folha para cada byte que aparece, ordenada por frequencia */
+    for (int b = 0; b < ALPHABET; b++) {
+        if (freq[b] == 0) continue;
+        BinTree *leaf = new_leaf((unsigned char)b);
+        if (!leaf || !pq_enqueue(pq, leaf, freq[b])) {
+            if (leaf) bt_destroy(leaf, free);
+            goto mem_error;
+        }
+        last_byte = b;
+    }
+
+    /* caso especial: so um byte distinto -> folha "dummy" para o codigo ter 1 bit */
+    if (pq_size(pq) == 1) {
+        BinTree *dummy = new_leaf((unsigned char)(last_byte + 1));
+        if (!dummy || !pq_enqueue(pq, dummy, 0)) {
+            if (dummy) bt_destroy(dummy, free);
+            goto mem_error;
+        }
+    }
+
+    /* passo 2: junta sempre os dois de menor frequencia */
+    while (pq_size(pq) > 1) {
+        uint64_t p1 = 0, p2 = 0;
+        BinTree *a = pq_dequeue(pq, &p1);
+        BinTree *b = pq_dequeue(pq, &p2);
+        BinTree *parent = new_internal(a, b);
+        if (!parent) {
+            bt_destroy(a, free);
+            bt_destroy(b, free);
+            goto mem_error;
+        }
+        if (!pq_enqueue(pq, parent, p1 + p2)) {
+            bt_destroy(parent, free);   /* ja libera a e b */
+            goto mem_error;
+        }
+    }
+
+    root = pq_dequeue(pq, NULL);        /* NULL se o arquivo era vazio */
+    pq_destroy(pq);
+    return root;
+
+mem_error:
+    drain_queue(pq);
+    pq_destroy(pq);
+    *status = HUFF_ERR_MEM;
+    return NULL;
+}
+
+
+/* ===================================================================
+ *  PARTE 7: DICIONARIO (byte -> codigo em texto "0101...")
+ * =================================================================== */
+
+/* Desce a arvore acumulando o caminho: esquerda = '0', direita = '1'. */
+static int fill_dictionary(Table *dict, const BinTree *node, char *path, int depth)
+{
+    if (bt_is_leaf(node)) {
+        unsigned char byte = *(unsigned char *)node->item;
+        char *code = malloc(depth + 1);
+        if (!code) return HUFF_ERR_MEM;
+        memcpy(code, path, depth);
+        code[depth] = '\0';
+        if (!table_put(dict, byte, code)) { free(code); return HUFF_ERR_MEM; }
+        return HUFF_OK;
+    }
+
+    path[depth] = '0';
+    int st = fill_dictionary(dict, node->left, path, depth + 1);
+    if (st != HUFF_OK) return st;
+
+    path[depth] = '1';
+    return fill_dictionary(dict, node->right, path, depth + 1);
+}
+
+static Table *build_dictionary(const BinTree *root, int *status)
+{
+    char path[MAX_CODE_LEN];
+    Table *dict = table_create(ALPHABET);
+    if (!dict) { *status = HUFF_ERR_MEM; return NULL; }
+
+    *status = fill_dictionary(dict, root, path, 0);
+    if (*status != HUFF_OK) {
+        table_destroy(dict, free);
+        return NULL;
+    }
+    return dict;
+}
+
+
+/* ===================================================================
+ *  PARTE 8: ARVORE <-> BYTES (pre-ordem, '*' = no interno, '\' = escape)
+ * =================================================================== */
+
+static void tree_serialize(const BinTree *node, unsigned char *buf, size_t *pos)
+{
+    if (bt_is_leaf(node)) {
+        unsigned char b = *(unsigned char *)node->item;
+        if (b == '*' || b == '\\')      /* folha igual a '*' ou '\' precisa de escape */
+            buf[(*pos)++] = '\\';
+        buf[(*pos)++] = b;
+    } else {
+        buf[(*pos)++] = '*';
+        tree_serialize(node->left, buf, pos);
+        tree_serialize(node->right, buf, pos);
+    }
+}
+
+/* Reconstroi a arvore a partir dos bytes. Devolve NULL se o formato for invalido. */
+static BinTree *tree_deserialize(const unsigned char *buf, size_t size, size_t *pos)
+{
+    if (*pos >= size) return NULL;
+    unsigned char c = buf[(*pos)++];
+
+    if (c == '*') {                     /* no interno: le filho esq. e dir. */
+        BinTree *left = tree_deserialize(buf, size, pos);
+        if (!left) return NULL;
+        BinTree *right = tree_deserialize(buf, size, pos);
+        if (!right) { bt_destroy(left, free); return NULL; }
+        BinTree *parent = new_internal(left, right);
+        if (!parent) {
+            bt_destroy(left, free);
+            bt_destroy(right, free);
+        }
+        return parent;
+    }
+
+    if (c == '\\') {                    /* escape: o proximo byte e uma folha */
+        if (*pos >= size) return NULL;
+        c = buf[(*pos)++];
+    }
+    return new_leaf(c);
+}
+
+
+/* ===================================================================
+ *  PARTE 9: COMPACTAR
+ * =================================================================== */
+
+/* Escreve o cabecalho: 3 bits de lixo + 13 bits do tamanho da arvore + arvore. */
+static int write_header(FILE *out, unsigned trash, size_t tree_size,
+                        const unsigned char *tree_bytes)
+{
+    unsigned char hdr[2];
+    hdr[0] = (unsigned char)((trash << 5) | (tree_size >> 8));  /* 3 bits lixo + 5 bits altos */
+    hdr[1] = (unsigned char)(tree_size & 0xFF);                 /* 8 bits baixos              */
+
+    if (fwrite(hdr, 1, 2, out) != 2) return HUFF_ERR_IO;
+    if (tree_size > 0 && fwrite(tree_bytes, 1, tree_size, out) != tree_size)
+        return HUFF_ERR_IO;
+    return HUFF_OK;
+}
+
+/* Le o arquivo original de novo e grava os codigos empacotados em bytes. */
+static int write_data(FILE *in, FILE *out, const Table *dict)
+{
+    unsigned char inbuf[BUF_SIZE], outbuf[BUF_SIZE];
+    size_t outlen = 0, n;
+    unsigned char current = 0;   /* byte sendo montado         */
+    int bitpos = 7;              /* proximo bit livre (b7..b0) */
+
+    while ((n = fread(inbuf, 1, BUF_SIZE, in)) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            const char *code = table_get(dict, inbuf[i]);
+            if (!code) return HUFF_ERR_IO;          /* arquivo mudou durante a leitura */
+            for (; *code; code++) {
+                if (*code == '1')
+                    current = set_bit(current, bitpos);
+                if (--bitpos < 0) {                 /* byte completo */
+                    outbuf[outlen++] = current;
+                    current = 0;
+                    bitpos = 7;
+                    if (outlen == BUF_SIZE) {
+                        if (fwrite(outbuf, 1, outlen, out) != outlen) return HUFF_ERR_IO;
+                        outlen = 0;
+                    }
+                }
             }
         }
     }
+    if (ferror(in)) return HUFF_ERR_IO;
+
+    if (bitpos != 7)                                /* ultimo byte incompleto (tem lixo) */
+        outbuf[outlen++] = current;
+    if (outlen > 0 && fwrite(outbuf, 1, outlen, out) != outlen)
+        return HUFF_ERR_IO;
+    return HUFF_OK;
 }
 
-No *remove_no_inicio(Lista *lista) {
-    No *aux = NULL;
-    if (lista->inicio) {
-        aux = lista->inicio;
-        lista->inicio = aux->proximo;
-        aux->proximo = NULL;
-        lista->tam--;
+/** Compacta in_path e grava em out_path. Devolve HUFF_OK ou um HUFF_ERR_*. */
+int huffman_compress(const char *in_path, const char *out_path)
+{
+    FILE *in = NULL, *out = NULL;
+    BinTree *root = NULL;
+    Table *dict = NULL;
+    uint64_t freq[ALPHABET] = {0};
+    unsigned char tree_bytes[TREE_BUF_SIZE];
+    size_t tree_size = 0;
+    int status;
+
+    in = fopen(in_path, "rb");
+    if (!in) return HUFF_ERR_IO;
+
+    status = count_frequencies(in, freq);
+    if (status != HUFF_OK) goto done;
+
+    root = build_tree(freq, &status);
+    if (status != HUFF_OK) goto done;
+
+    uint64_t total_bits = 0;
+    if (root) {
+        dict = build_dictionary(root, &status);
+        if (status != HUFF_OK) goto done;
+        tree_serialize(root, tree_bytes, &tree_size);
+        for (int b = 0; b < ALPHABET; b++)
+            if (freq[b] > 0)
+                total_bits += freq[b] * strlen(table_get(dict, b));
     }
-    return aux;
+    unsigned trash = (unsigned)((8 - (total_bits % 8)) % 8);
+
+    out = fopen(out_path, "wb");
+    if (!out) { status = HUFF_ERR_IO; goto done; }
+
+    status = write_header(out, trash, tree_size, tree_bytes);
+    if (status != HUFF_OK) goto done;
+
+    if (root) {
+        rewind(in);
+        status = write_data(in, out, dict);
+    }
+
+done:
+    if (out && fclose(out) != 0 && status == HUFF_OK) status = HUFF_ERR_IO;
+    if (in) fclose(in);
+    table_destroy(dict, free);
+    bt_destroy(root, free);
+    return status;
 }
 
-/* ============ PARTE 3: ARVORE DE HUFFMAN ============ */
-No *montar_arvore(Lista *lista) {
-    No *primeiro, *segundo, *novo;
-    while (lista->tam > 1) {
-        primeiro = remove_no_inicio(lista);
-        segundo  = remove_no_inicio(lista);
-        novo = malloc(sizeof(No));
-        if (novo) {
-            novo->caracter = '+';                       // no interno (valor irrelevante)
-            novo->frequencia = primeiro->frequencia + segundo->frequencia;
-            novo->esq = primeiro;
-            novo->dir = segundo;
-            novo->proximo = NULL;
-            inserir_ordenado(lista, novo);
-        } else {
-            printf("\tERRO ao alocar memoria em montar_arvore!\n");
-            break;
+
+/* ===================================================================
+ *  PARTE 10: DESCOMPACTAR
+ * =================================================================== */
+
+/* Le os bits dos dados andando pela arvore e grava cada byte encontrado. */
+static int decode_data(FILE *in, FILE *out, const BinTree *root, uint64_t total_bits)
+{
+    unsigned char inbuf[BUF_SIZE], outbuf[BUF_SIZE];
+    size_t outlen = 0, n;
+    const BinTree *cur = root;
+    uint64_t done = 0;
+
+    if (bt_is_leaf(root)) return total_bits == 0 ? HUFF_OK : HUFF_ERR_FORMAT;
+
+    while (done < total_bits && (n = fread(inbuf, 1, BUF_SIZE, in)) > 0) {
+        for (size_t i = 0; i < n && done < total_bits; i++) {
+            for (int b = 7; b >= 0 && done < total_bits; b--, done++) {
+                cur = is_bit_i_set(inbuf[i], b) ? cur->right : cur->left;
+                if (bt_is_leaf(cur)) {                       /* achou um byte */
+                    outbuf[outlen++] = *(unsigned char *)cur->item;
+                    cur = root;
+                    if (outlen == BUF_SIZE) {
+                        if (fwrite(outbuf, 1, outlen, out) != outlen) return HUFF_ERR_IO;
+                        outlen = 0;
+                    }
+                }
+            }
         }
     }
-    return lista->inicio;                               // raiz
+    if (ferror(in)) return HUFF_ERR_IO;
+    if (done < total_bits) return HUFF_ERR_FORMAT;           /* arquivo truncado */
+
+    if (outlen > 0 && fwrite(outbuf, 1, outlen, out) != outlen) return HUFF_ERR_IO;
+    return HUFF_OK;
 }
 
-void imprimir_arvore(No *raiz, int tam) {
-    if (raiz->esq == NULL && raiz->dir == NULL) {
-        printf("\tFolha: %c\tAltura: %d\n", raiz->caracter, tam);
-    } else {
-        imprimir_arvore(raiz->esq, tam + 1);
-        imprimir_arvore(raiz->dir, tam + 1);
+/** Descompacta in_path (.huff) e grava em out_path. Devolve HUFF_OK ou HUFF_ERR_*. */
+int huffman_decompress(const char *in_path, const char *out_path)
+{
+    FILE *in = NULL, *out = NULL;
+    BinTree *root = NULL;
+    unsigned char hdr[2];
+    unsigned char tree_bytes[MAX_TREE_SIZE];
+    int status = HUFF_OK;
+
+    in = fopen(in_path, "rb");
+    if (!in) return HUFF_ERR_IO;
+
+    /* --- cabecalho --- */
+    if (fread(hdr, 1, 2, in) != 2) { status = HUFF_ERR_FORMAT; goto done; }
+    unsigned trash = hdr[0] >> 5;                               /* 3 bits de lixo      */
+    size_t tree_size = ((size_t)(hdr[0] & 0x1F) << 8) | hdr[1]; /* 13 bits da arvore   */
+
+    if (fseek(in, 0, SEEK_END) != 0) { status = HUFF_ERR_IO; goto done; }
+    long file_size = ftell(in);
+    if (file_size < 0 || fseek(in, 2, SEEK_SET) != 0) { status = HUFF_ERR_IO; goto done; }
+    if ((size_t)file_size < 2 + tree_size) { status = HUFF_ERR_FORMAT; goto done; }
+    uint64_t data_bytes = (uint64_t)file_size - 2 - tree_size;
+
+    /* --- arvore --- */
+    if (tree_size > 0) {
+        if (fread(tree_bytes, 1, tree_size, in) != tree_size) { status = HUFF_ERR_IO; goto done; }
+        size_t pos = 0;
+        root = tree_deserialize(tree_bytes, tree_size, &pos);
+        if (!root || pos != tree_size) { status = HUFF_ERR_FORMAT; goto done; }
+    } else if (data_bytes != 0 || trash != 0) {
+        status = HUFF_ERR_FORMAT;                               /* sem arvore, so vale arquivo vazio */
+        goto done;
+    }
+
+    if (data_bytes == 0 && trash != 0) { status = HUFF_ERR_FORMAT; goto done; }
+    uint64_t total_bits = data_bytes * 8 - trash;
+
+    /* --- dados --- */
+    out = fopen(out_path, "wb");
+    if (!out) { status = HUFF_ERR_IO; goto done; }
+
+    if (root)
+        status = decode_data(in, out, root, total_bits);
+
+done:
+    if (out && fclose(out) != 0 && status == HUFF_OK) status = HUFF_ERR_IO;
+    if (in) fclose(in);
+    bt_destroy(root, free);
+    return status;
+}
+
+/** Converte um codigo de retorno em mensagem legivel. */
+const char *huffman_strerror(int code)
+{
+    switch (code) {
+        case HUFF_OK:         return "sucesso";
+        case HUFF_ERR_IO:     return "erro ao abrir, ler ou gravar arquivo";
+        case HUFF_ERR_MEM:    return "memoria insuficiente";
+        case HUFF_ERR_FORMAT: return "arquivo .huff invalido ou corrompido";
+        default:              return "erro desconhecido";
     }
 }
 
-int altura_arvore(No *raiz) {
-    if (raiz == NULL) return -1;
-    int esq = altura_arvore(raiz->esq) + 1;
-    int dir = altura_arvore(raiz->dir) + 1;
-    return esq > dir ? esq : dir;
+
+/* ===================================================================
+ *  PARTE 11: PROGRAMA PRINCIPAL (linha de comando)
+ * =================================================================== */
+
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+        "Uso:\n"
+        "  %s -c <arquivo> [-o <saida>]        compacta    (padrao: <arquivo>.huff)\n"
+        "  %s -d <arquivo.huff> [-o <saida>]   descompacta (padrao: remove .huff)\n",
+        prog, prog);
 }
 
-/* ============ PARTE 4: DICIONARIO ============ */
-char **aloca_dicionario(int colunas) {
-    char **dicionario = malloc(sizeof(char *) * TAM);
-    for (int i = 0; i < TAM; i++)
-        dicionario[i] = calloc(colunas, sizeof(char));
-    return dicionario;
-}
-
-void gerar_dicionario(char **dicionario, No *raiz, char *caminho, int colunas) {
-    char esquerda[colunas], direita[colunas];
-    if (raiz->esq == NULL && raiz->dir == NULL) {       // folha
-        strcpy(dicionario[raiz->caracter], caminho);
-    } else {
-        strcpy(esquerda, caminho);
-        strcpy(direita, caminho);
-        strcat(esquerda, "0");
-        strcat(direita, "1");
-        gerar_dicionario(dicionario, raiz->esq, esquerda, colunas);
-        gerar_dicionario(dicionario, raiz->dir, direita, colunas);
-    }
-}
-
-void imprime_dicionario(char **dicionario) {
-    printf("\n\tDicionario:\n");
-    for (int i = 0; i < TAM; i++)
-        if (strlen(dicionario[i]) > 0)
-            printf("\t%3d: %s\n", i, dicionario[i]);
-}
-
-/* ============ PARTE 5: CODIFICAR ============ */
-int calcula_tamanho_string(char **dicionario, unsigned char *texto) {
-    int tam = 0;
-    for (int i = 0; texto[i] != '\0'; i++)
-        tam += strlen(dicionario[texto[i]]);
-    return tam + 1;                                     // +1 para o '\0'
-}
-
-char *codificar(char **dicionario, unsigned char *texto) {
-    int tam = calcula_tamanho_string(dicionario, texto);
-    char *codigo = calloc(tam, sizeof(char));
-    for (int i = 0; texto[i] != '\0'; i++)
-        strcat(codigo, dicionario[texto[i]]);
-    return codigo;
-}
-
-/* ============ PARTE 6: DECODIFICAR ============ */
-char *decodificar(unsigned char texto[], No *raiz) {
-    No *aux = raiz;
-    char temp[2];
-    char *decodificado = calloc(strlen((char *)texto) + 1, sizeof(char));
-    for (int i = 0; texto[i] != '\0'; i++) {
-        aux = (texto[i] == '0') ? aux->esq : aux->dir;
-        if (aux->esq == NULL && aux->dir == NULL) {     // chegou numa folha
-            temp[0] = aux->caracter;
-            temp[1] = '\0';
-            strcat(decodificado, temp);
-            aux = raiz;                                 // volta para a raiz
-        }
-    }
-    return decodificado;
-}
-
-/* ============ PARTE 7: LIBERAR MEMORIA ============ */
-void liberar_arvore(No *raiz) {
-    if (raiz) {
-        liberar_arvore(raiz->esq);
-        liberar_arvore(raiz->dir);
-        free(raiz);
-    }
-}
-
-void liberar_dicionario(char **dicionario) {
-    for (int i = 0; i < TAM; i++) free(dicionario[i]);
-    free(dicionario);
-}
-
-/* ============ MAIN ============ */
-int main() {
-    unsigned char texto[] = "Vamos aprender a programar";
-    unsigned int tabela_frequencia[TAM];
-    Lista lista;
-    No *arvore;
-    char **dicionario;
-    int colunas;
-    char *codificado, *decodificado;
-
-    inicializa_tabela_com_zero(tabela_frequencia);
-    preenche_tab_frequencia(texto, tabela_frequencia);
-
-    criar_lista(&lista);
-    preencher_lista(tabela_frequencia, &lista);
-
-    arvore = montar_arvore(&lista);
-    printf("\n\tArvore de Huffman\n");
-    imprimir_arvore(arvore, 0);
-
-    colunas = altura_arvore(arvore) + 1;
-    dicionario = aloca_dicionario(colunas);
-    gerar_dicionario(dicionario, arvore, "", colunas);
-    imprime_dicionario(dicionario);
-
-    codificado = codificar(dicionario, texto);
-    printf("\n\tTexto codificado: %s\n", codificado);
-
-    decodificado = decodificar((unsigned char *)codificado, arvore);
-    printf("\n\tTexto decodificado: %s\n\n", decodificado);
-
-    free(codificado);
-    free(decodificado);
-    liberar_dicionario(dicionario);
-    liberar_arvore(arvore);
+static int file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return 1; }
     return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    if (argc != 3 && argc != 5) { usage(argv[0]); return 1; }
+
+    const char *mode = argv[1];
+    const char *in_path = argv[2];
+    const char *out_arg = NULL;
+
+    if (argc == 5) {
+        if (strcmp(argv[3], "-o") != 0) { usage(argv[0]); return 1; }
+        out_arg = argv[4];
+    }
+    if (strcmp(mode, "-c") != 0 && strcmp(mode, "-d") != 0) { usage(argv[0]); return 1; }
+
+    /* monta o nome do arquivo de saida */
+    size_t len = strlen(in_path);
+    char *out_path = malloc(len + 8);
+    if (!out_path) { fprintf(stderr, "memoria insuficiente\n"); return 1; }
+
+    if (out_arg) {
+        strcpy(out_path, out_arg);
+    } else if (strcmp(mode, "-c") == 0) {
+        sprintf(out_path, "%s.huff", in_path);
+    } else {
+        if (len > 5 && strcmp(in_path + len - 5, ".huff") == 0) {
+            strcpy(out_path, in_path);
+            out_path[len - 5] = '\0';
+        } else {
+            sprintf(out_path, "%s.out", in_path);
+        }
+        if (file_exists(out_path)) {     /* nao sobrescreve o original sem pedir */
+            fprintf(stderr, "'%s' ja existe. Use -o <saida> para escolher outro nome.\n", out_path);
+            free(out_path);
+            return 1;
+        }
+    }
+
+    if (strcmp(in_path, out_path) == 0) {
+        fprintf(stderr, "entrada e saida nao podem ser o mesmo arquivo\n");
+        free(out_path);
+        return 1;
+    }
+
+    int status = (strcmp(mode, "-c") == 0)
+               ? huffman_compress(in_path, out_path)
+               : huffman_decompress(in_path, out_path);
+
+    if (status != HUFF_OK)
+        fprintf(stderr, "Erro: %s\n", huffman_strerror(status));
+    else
+        printf("OK: %s -> %s\n", in_path, out_path);
+
+    free(out_path);
+    return status == HUFF_OK ? 0 : 1;
 }
