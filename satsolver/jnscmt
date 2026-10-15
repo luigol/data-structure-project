@@ -1,0 +1,232 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---------------- Estruturas ---------------- */
+
+typedef struct {
+    int *lits;   /* literais: +v (positivo) ou -v (negado) */
+    int size;
+} Clause;
+
+static int num_vars = 0;
+static int num_clauses = 0;
+static Clause *clauses = NULL;
+
+static int *val = NULL;     /* val[v]: 0 = livre, 1 = verdadeiro, -1 = falso */
+static int *trail = NULL;   /* pilha de variaveis atribuidas (para backtracking) */
+static int trail_len = 0;
+
+static long decisions = 0, propagations = 0;
+
+/* ---------------- Utilitarios ---------------- */
+
+static inline int lit_value(int lit) {
+    int v = val[abs(lit)];
+    return lit > 0 ? v : -v;   /* 1 = true, -1 = false, 0 = livre */
+}
+
+static void assign(int lit) {
+    val[abs(lit)] = lit > 0 ? 1 : -1;
+    trail[trail_len++] = abs(lit);
+}
+
+static void undo_to(int mark) {
+    while (trail_len > mark)
+        val[trail[--trail_len]] = 0;
+}
+
+/* ---------------- Parser DIMACS ---------------- */
+
+static int read_dimacs(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror("Erro ao abrir arquivo"); return 0; }
+
+    char line[4096];
+    int header = 0;
+
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == 'c' || line[0] == '\n' || line[0] == '\r') continue;
+        if (line[0] == '%') break;               /* alguns benchmarks (SATLIB) */
+        if (line[0] == 'p') {
+            if (sscanf(line, "p cnf %d %d", &num_vars, &num_clauses) != 2) {
+                fprintf(stderr, "Linha 'p cnf' invalida\n");
+                fclose(f);
+                return 0;
+            }
+            header = 1;
+            break;
+        }
+    }
+    if (!header) { fprintf(stderr, "Cabecalho 'p cnf' nao encontrado\n"); fclose(f); return 0; }
+
+    clauses = malloc(sizeof(Clause) * (num_clauses > 0 ? num_clauses : 1));
+    int cap = 16, n, lit, count = 0;
+    int *buf = malloc(sizeof(int) * cap);
+
+    while (count < num_clauses) {
+        n = 0;
+        while (1) {
+            if (fscanf(f, "%d", &lit) != 1) { lit = 0; if (n == 0) goto fim; }
+            if (lit == 0) break;
+            if (abs(lit) > num_vars) {
+                fprintf(stderr, "Literal %d fora do intervalo\n", lit);
+                free(buf); fclose(f); return 0;
+            }
+            if (n == cap) { cap *= 2; buf = realloc(buf, sizeof(int) * cap); }
+            buf[n++] = lit;
+        }
+        clauses[count].lits = malloc(sizeof(int) * (n > 0 ? n : 1));
+        memcpy(clauses[count].lits, buf, sizeof(int) * n);
+        clauses[count].size = n;
+        count++;
+    }
+fim:
+    num_clauses = count;
+    free(buf);
+    fclose(f);
+    return 1;
+}
+
+/* ---------------- Propagacao unitaria ---------------- */
+
+/* Retorna 0 se encontrar conflito (clausula falsa), 1 caso contrario. */
+static int propagate(void) {
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = 0; i < num_clauses; i++) {
+            Clause *c = &clauses[i];
+            int satisfied = 0, free_cnt = 0, unit = 0;
+
+            for (int j = 0; j < c->size; j++) {
+                int v = lit_value(c->lits[j]);
+                if (v == 1) { satisfied = 1; break; }
+                if (v == 0) { free_cnt++; unit = c->lits[j]; }
+            }
+            if (satisfied) continue;
+            if (free_cnt == 0) return 0;          /* conflito */
+            if (free_cnt == 1) {                  /* clausula unitaria */
+                assign(unit);
+                propagations++;
+                changed = 1;
+            }
+        }
+    }
+    return 1;
+}
+
+/* ---------------- Eliminacao de literais puros ---------------- */
+
+static void pure_literals(int *pos, int *neg) {
+    memset(pos, 0, sizeof(int) * (num_vars + 1));
+    memset(neg, 0, sizeof(int) * (num_vars + 1));
+
+    for (int i = 0; i < num_clauses; i++) {
+        Clause *c = &clauses[i];
+        int satisfied = 0;
+        for (int j = 0; j < c->size; j++)
+            if (lit_value(c->lits[j]) == 1) { satisfied = 1; break; }
+        if (satisfied) continue;
+
+        for (int j = 0; j < c->size; j++) {
+            int l = c->lits[j];
+            if (lit_value(l) != 0) continue;
+            if (l > 0) pos[l]++; else neg[-l]++;
+        }
+    }
+    for (int v = 1; v <= num_vars; v++) {
+        if (val[v] != 0) continue;
+        if (pos[v] > 0 && neg[v] == 0) assign(v);
+        else if (neg[v] > 0 && pos[v] == 0) assign(-v);
+    }
+}
+
+/* ---------------- Escolha de variavel (heuristica: mais frequente) ---------------- */
+
+/* Retorna 0 se todas as clausulas estao satisfeitas. */
+static int choose_var(int *score) {
+    memset(score, 0, sizeof(int) * (num_vars + 1));
+    int any_unsat = 0;
+
+    for (int i = 0; i < num_clauses; i++) {
+        Clause *c = &clauses[i];
+        int satisfied = 0;
+        for (int j = 0; j < c->size; j++)
+            if (lit_value(c->lits[j]) == 1) { satisfied = 1; break; }
+        if (satisfied) continue;
+
+        any_unsat = 1;
+        for (int j = 0; j < c->size; j++)
+            if (lit_value(c->lits[j]) == 0) score[abs(c->lits[j])]++;
+    }
+    if (!any_unsat) return 0;
+
+    int best = 0, best_score = -1;
+    for (int v = 1; v <= num_vars; v++)
+        if (val[v] == 0 && score[v] > best_score) { best_score = score[v]; best = v; }
+    return best;
+}
+
+/* ---------------- DPLL ---------------- */
+
+static int dpll(int *a, int *b) {
+    int mark = trail_len;
+
+    if (!propagate()) { undo_to(mark); return 0; }
+    pure_literals(a, b);
+
+    int v = choose_var(a);
+    if (v == 0) return 1;   /* todas as clausulas satisfeitas */
+
+    decisions++;
+
+    int mark2 = trail_len;
+    assign(v);                                  /* tenta verdadeiro */
+    if (dpll(a, b)) return 1;
+    undo_to(mark2);
+
+    assign(-v);                                 /* tenta falso */
+    if (dpll(a, b)) return 1;
+
+    undo_to(mark);
+    return 0;
+}
+
+/* ---------------- Main ---------------- */
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "Uso: %s arquivo.cnf\n", argv[0]);
+        return 1;
+    }
+    if (!read_dimacs(argv[1])) return 1;
+
+    val   = calloc(num_vars + 1, sizeof(int));
+    trail = malloc(sizeof(int) * (num_vars + 1));
+    int *a = malloc(sizeof(int) * (num_vars + 1));
+    int *b = malloc(sizeof(int) * (num_vars + 1));
+
+    printf("c Variaveis: %d | Clausulas: %d\n", num_vars, num_clauses);
+
+    int sat = dpll(a, b);
+
+    if (sat) {
+        printf("s SATISFIABLE\n");
+        printf("v");
+        int col = 1;
+        for (int v = 1; v <= num_vars; v++) {
+            int lit = (val[v] == 1) ? v : -v;   /* variaveis livres = falso */
+            col += printf(" %d", lit);
+            if (col > 70) { printf("\nv"); col = 1; }
+        }
+        printf(" 0\n");
+    } else {
+        printf("s UNSATISFIABLE\n");
+    }
+    printf("c Decisoes: %ld | Propagacoes: %ld\n", decisions, propagations);
+
+    for (int i = 0; i < num_clauses; i++) free(clauses[i].lits);
+    free(clauses); free(val); free(trail); free(a); free(b);
+    return sat ? 10 : 20;   /* convencao dos SAT solvers */
+}
