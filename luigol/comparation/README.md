@@ -30,24 +30,38 @@ A diferença esperada é clara: a lista percorre os elementos um por um, enquant
 - **O(n):** o número de comparações cresce junto com o tamanho da estrutura. Com 1.000 elementos, no pior caso são 1.000 comparações.
 - **O(log n):** cada comparação elimina metade dos candidatos restantes. Com 1.000 elementos são ~10 comparações (`log₂ 1.000 ≈ 10`); com 1.000.000, apenas ~20.
 
-> ⚠️ O(log n) só vale se a árvore estiver **balanceada**. Com valores inseridos em ordem aleatória, a BST fica "quase" balanceada: a busca custa em média ~1,39 × log₂ n, por isso aparecem valores entre 6 e 27 no gráfico, e não sempre 14. Se os valores chegassem em **ordem crescente**, a BST viraria uma lista e a busca voltaria a ser O(n). É isso que a opção "Árvore desbalanceada vs AVL" explora.
+> ⚠️ O(log n) só vale se a árvore estiver **balanceada**. Com valores inseridos em ordem aleatória, a BST fica "quase" balanceada: a busca custa em média ~1,39 × log₂ n, por isso aparecem valores como 5 ou 33 no gráfico, e não sempre 14. Se os valores chegassem em **ordem crescente**, a BST viraria uma lista e a busca voltaria a ser O(n). É isso que a opção "Árvore desbalanceada vs AVL" explora.
 
 ---
 
 ## 2. As estruturas
 
-### Lista encadeada: `list_node`
+### Um único tipo de nó: `node`
 
-Cada nó guarda um valor e um ponteiro para o próximo.
+A lista e a BST usam o mesmo `struct`. A lista só usa o `next`, e a BST só usa o `left` e o `right`.
 
 ```c
-typedef struct list_node {
-    int value;              // Valor armazenado
-    struct list_node *next; // Ponteiro para o próximo nó
-} list_node;
+typedef struct node {
+    int number;          // Valor armazenado
+    struct node *next;   // Lista: próximo nó
+    struct node *left;   // BST: filho esquerdo (valores menores)
+    struct node *right;  // BST: filho direito (valores maiores)
+} node;
 ```
 
-O `list_add` insere **no início** da lista (custo O(1)), então a lista fica na **ordem inversa** da inserção. Inserindo `34, 23, 47, 10, 55`:
+| Campo | Lista | BST |
+|---|---|---|
+| `number` | ✅ | ✅ |
+| `next` | ✅ | fica `NULL` |
+| `left`, `right` | ficam `NULL` | ✅ |
+
+> 💡 Os nós são criados com `calloc`, que zera a memória. Por isso todos os ponteiros já nascem `NULL` e não é preciso atribuir um por um.
+
+> ⚠️ Cada número é inserido **duas vezes**: um nó para a lista e outro, separado, para a BST. As duas estruturas não compartilham nós, então cada uma pode ser liberada sem afetar a outra. O custo de usar um tipo só é que cada nó carrega ponteiros que a sua estrutura não usa.
+
+### Lista encadeada
+
+O `list_insert` insere **no início** da lista (custo O(1)), então a lista fica na **ordem inversa** da inserção. Inserindo `34, 23, 47, 10, 55`:
 
 ```
 head → [55] → [10] → [47] → [23] → [34] → NULL
@@ -55,19 +69,9 @@ head → [55] → [10] → [47] → [23] → [34] → NULL
 
 A busca começa sempre no `head` e avança um nó por vez até achar o valor ou chegar ao `NULL`.
 
-### Árvore de Busca Binária: `bst_node`
+### Árvore de Busca Binária
 
-Cada nó guarda um valor e dois ponteiros: filho esquerdo (valores **menores**) e filho direito (valores **maiores**).
-
-```c
-typedef struct bst_node {
-    int value;              // Valor armazenado
-    struct bst_node *left;  // Ponteiro para o filho esquerdo
-    struct bst_node *right; // Ponteiro para o filho direito
-} bst_node;
-```
-
-Inserindo os mesmos `34, 23, 47, 10, 55`:
+Cada nó aponta para o filho esquerdo (valores **menores**) e para o filho direito (valores **maiores**). Inserindo os mesmos `34, 23, 47, 10, 55`:
 
 ```
         34
@@ -83,27 +87,32 @@ A busca compara o valor com o nó atual e desce pela esquerda ou pela direita, d
 
 | Função | O que faz |
 |---|---|
-| `list_add` | cria um nó e o coloca no início da lista |
+| `list_insert` | cria um nó e o coloca no início da lista |
 | `list_search` | percorre a lista contando comparações |
 | `list_free` | libera todos os nós da lista |
-| `bst_add` | desce pela árvore e insere o valor numa folha |
+| `bst_insert` | desce pela árvore e insere o valor numa folha |
 | `bst_search` | desce pela árvore contando comparações |
 | `bst_free` | libera a árvore em pós-ordem (filhos antes do pai) |
 
-> 💡 **Valores repetidos:** o `bst_add` ignora um valor que já existe (não é `<` nem `>`), enquanto a lista guarda todos. Na busca, a lista para na primeira ocorrência que encontrar.
+> 💡 **Valores repetidos:** o `bst_insert` ignora um valor que já existe (não é `<` nem `>`), enquanto a lista guarda todos. Na busca, a lista para na primeira ocorrência que encontrar.
 
 ---
 
 ## 3. Contagem de comparações
 
-Cada função de busca recebe um contador e o incrementa a cada nó visitado. O retorno é o total de comparações até achar o número, ou `-1` se ele não existir.
+Cada função de busca recebe um contador e o passa adiante com `counter + 1` a cada nó visitado. O retorno é o total de comparações até achar o número, ou `-1` se ele não existir.
 
 ```c
-int list_search(list_node *node, int value, int counter);
-int bst_search(bst_node *node, int value, int counter);
+int list_search(node *curr_node, int random, int counter);
+int bst_search(node *curr_node, int random, int counter);
 ```
 
-As duas são chamadas com `counter = 0` e incrementam **antes** de comparar, então o primeiro nó visitado já conta como `1`.
+As duas são chamadas com `counter = 0`. Ao achar o número, devolvem `counter + 1`, porque a comparação com o próprio nó encontrado também conta. Assim, achar o número logo no primeiro nó dá `1` comparação.
+
+```c
+if (curr_node == NULL) return -1;                    // acabou a estrutura: não achou
+if (curr_node->number == random) return counter + 1; // achou: conta este nó
+```
 
 Usando as estruturas do exemplo acima:
 
@@ -115,7 +124,7 @@ Usando as estruturas do exemplo acima:
 
 > A lista pode ganhar quando o número está perto do `head`. Com 10.000 elementos isso quase nunca acontece: em média ele está no meio.
 
-> 💡 O número sorteado sai do próprio vetor `values[]` (`values[rand() % N]`), então ele **sempre existe** nas duas estruturas e a busca nunca devolve `-1`.
+> 💡 O número sorteado sai do próprio vetor `arr[]` (`arr[rand() % N]`), então ele **sempre existe** nas duas estruturas e a busca nunca devolve `-1`.
 
 ---
 
@@ -181,7 +190,7 @@ Exemplo com `srand(1)`, conferido rodando o compilador desta máquina:
 
 As constantes (`214013`, `2531011`) são escolhidas para a sequência demorar o máximo possível para se repetir e espalhar bem os valores. Outras implementações usam outras constantes: o livro *Numerical Recipes* sugere `1664525` e `1013904223`, e o `rand()` do Linux (glibc) nem usa LCG por padrão.
 
-> ⚠️ **Consequência no Windows:** como `rand()` nunca passa de `32767`, o `rand() % MAX_NUMBER` com `MAX_NUMBER = 100000` também não passa. No `results.csv` atual, o maior número sorteado é `32727`. Com 10.000 valores em apenas 32.768 possíveis, vários se repetem, e a BST acaba com menos nós que a lista.
+> ⚠️ **Consequência no Windows:** como `rand()` nunca passa de `32767`, o `rand() % MAX_NUMBER` com `MAX_NUMBER = 100000` também não passa: nenhum número do `results.csv` é maior que `32767`. Com 10.000 valores em apenas 32.768 possíveis, vários se repetem, e a BST acaba com menos nós que a lista.
 
 **Fontes:**
 - Knuth, D. E. *The Art of Computer Programming, Vol. 2: Seminumerical Algorithms*. Addison-Wesley, 1997.
@@ -195,7 +204,7 @@ As constantes (`214013`, `2531011`) são escolhidas para a sequência demorar o 
 |---|---|---|
 | `N` | 10000 | número de elementos inseridos nas estruturas |
 | `MAX_NUMBER` | 100000 | limite dos valores gerados (no Windows, na prática, 32767) |
-| `DRAWS` | 100 | número de sorteios |
+| `DRAWS` | 1000 | número de sorteios |
 
 ---
 
@@ -247,16 +256,16 @@ O gráfico é salvo como `Rplots.pdf` na mesma pasta.
 Durante a execução, cada sorteio aparece no terminal:
 
 ```
-Numero sorteado: 11682 | Lista: 9433 comparacoes | BST: 17 comparacoes
+Drawn number: 4717 | List comparisons: 391 | Binary search tree comparisons: 27
 ```
 
 E é gravado no `results.csv`:
 
 ```
 drawn_number,list_comparisons,bst_comparisons
-11682,9433,17
-6434,4191,17
-11097,8607,18
+4717,391,27
+8215,6657,13
+22700,834,17
 ...
 ```
 
@@ -273,19 +282,22 @@ drawn_number,list_comparisons,bst_comparisons
 ```r
 dados <- read.csv("results.csv")
 
-plot(1:nrow(dados), dados$list_comparisons,
-     type="l", col="red",
-     xlab="Sorteio", ylab="Comparações",
-     main="Lista vs BST")
+plot(dados$list_comparisons, type="l", col="red",
+     xlab="Sorteio", ylab="Comparações", main="Lista vs BST")
 
-lines(1:nrow(dados), dados$bst_comparisons, col="blue")
+lines(dados$bst_comparisons, col="blue")
 
-legend("topright",
-       legend=c("Lista", "BST"),
-       col=c("red", "blue"), lty=1)
+legend("topright", legend=c("Lista", "BST"), col=c("red", "blue"), lty=1)
 ```
 
-Para quem nunca viu R: a linguagem foi feita para análise de dados e gráficos. Ela trabalha com **tabelas** (chamadas de *data frames*) e tem funções prontas para desenhar.
+Para quem nunca viu R: a linguagem foi feita para análise de dados e gráficos. Ela trabalha com **tabelas** (chamadas de *data frames*) e tem funções prontas para desenhar. O script inteiro são 4 passos:
+
+| Linha | O que faz |
+|---|---|
+| `read.csv` | lê o CSV e guarda a tabela em `dados` |
+| `plot` | cria o gráfico com a linha vermelha da lista |
+| `lines` | desenha a linha azul da BST **por cima** do mesmo gráfico |
+| `legend` | põe a legenda que diz qual cor é qual |
 
 ### `read.csv`: lê os dados
 
@@ -301,24 +313,23 @@ dados <- read.csv("results.csv")
 ### `plot`: desenha a primeira linha (a Lista)
 
 ```r
-plot(1:nrow(dados), dados$list_comparisons,
-     type="l", col="red",
-     xlab="Sorteio", ylab="Comparações",
-     main="Lista vs BST")
+plot(dados$list_comparisons, type="l", col="red",
+     xlab="Sorteio", ylab="Comparações", main="Lista vs BST")
 ```
 
 | Argumento | Significado |
 |---|---|
-| `1:nrow(dados)` | eixo X: `nrow()` conta as linhas (sorteios) e `1:n` gera `1, 2, 3, ..., n` |
 | `dados$list_comparisons` | eixo Y: comparações da lista em cada sorteio |
 | `type="l"` | liga os pontos com uma **linha** (`l` de *line*); sem isso seriam pontos soltos |
 | `col="red"` | linha vermelha |
 | `xlab`, `ylab`, `main` | rótulos dos eixos e título |
 
+> 💡 **E o eixo X?** Quando o `plot` recebe uma coluna só, o R usa a posição de cada valor como eixo X: `1, 2, 3, ...`, ou seja, o número do sorteio. Não precisa passar nada.
+
 ### `lines`: adiciona a segunda linha (a BST)
 
 ```r
-lines(1:nrow(dados), dados$bst_comparisons, col="blue")
+lines(dados$bst_comparisons, col="blue")
 ```
 
 - `plot()` cria um gráfico **do zero**; `lines()` **desenha por cima** de um que já existe.
@@ -327,9 +338,7 @@ lines(1:nrow(dados), dados$bst_comparisons, col="blue")
 ### `legend`: explica as cores
 
 ```r
-legend("topright",
-       legend=c("Lista", "BST"),
-       col=c("red", "blue"), lty=1)
+legend("topright", legend=c("Lista", "BST"), col=c("red", "blue"), lty=1)
 ```
 
 | Argumento | Significado |
@@ -343,13 +352,13 @@ legend("topright",
 
 ### Resultado esperado
 
-Números do `results.csv` atual (mudam a cada execução, por causa do `srand(time(NULL))`):
+Números de uma execução com 1.000 sorteios (mudam a cada execução, por causa do `srand(time(NULL))`):
 
 | | Lista | BST |
 |---|---|---|
-| Média | 4.637 | 17 |
-| Mínimo | 110 | 6 |
-| Máximo | 9.914 | 27 |
+| Média | 4.979 | 17,9 |
+| Mínimo | 7 | 5 |
+| Máximo | 9.995 | 33 |
 
 > ✅ A linha vermelha (lista) fica alta e pula entre quase 0 e `N`, dependendo de onde o número está na lista. A linha azul (BST) fica colada no chão, perto de `log₂ n`. Essa é a diferença entre **O(n)** e **O(log n)** vista no gráfico.
 
