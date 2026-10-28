@@ -328,7 +328,7 @@ void compress(char *file_path) {
         fill_codes_table(root, codes_table, path, 0);
     }
 
-    // 5) Formation
+    // 5) Formatation
     // Number of padding bits in last byte
     unsigned long long total_bits = 0;
     for (int i = 0; i < 256; i++)

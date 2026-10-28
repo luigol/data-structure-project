@@ -1,0 +1,15 @@
+Tempo,Temperatura,Umidade,Vento,Jogar
+Ensolarado,Quente,Alta,Fraco,Nao
+Ensolarado,Quente,Alta,Forte,Nao
+Nublado,Quente,Alta,Fraco,Sim
+Chuvoso,Amena,Alta,Fraco,Sim
+Chuvoso,Fria,Normal,Fraco,Sim
+Chuvoso,Fria,Normal,Forte,Nao
+Nublado,Fria,Normal,Forte,Sim
+Ensolarado,Amena,Alta,Fraco,Nao
+Ensolarado,Fria,Normal,Fraco,Sim
+Chuvoso,Amena,Normal,Fraco,Sim
+Ensolarado,Amena,Normal,Forte,Sim
+Nublado,Amena,Alta,Forte,Sim
+Nublado,Quente,Normal,Fraco,Sim
+Chuvoso,Amena,Alta,Forte,Nao

@@ -112,4 +112,6 @@ int main() {
 
     list_free(head);
     bst_free(root);
+
+    return 0;
 }
