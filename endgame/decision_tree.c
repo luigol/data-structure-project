@@ -1,16 +1,11 @@
 /*
- * Árvore de Decisão com Entropia (ID3) - versão simples com CSV
- * Estruturas de Dados / Programação 2 - ECOM008 - UFAL
- *
- * Compilar: gcc arvore_decisao_csv.c -o arvore -lm
- * Executar: ./arvore jogar_tenis.csv
- *
- * Formato do CSV:
- *   - primeira linha: nomes das colunas
- *   - demais linhas: os exemplos
- *   - a ÚLTIMA coluna é a classe (o que queremos prever)
- *   - todos os valores são categorias (texto) e nenhuma célula pode ficar vazia
- */
+Formato do CSV:
+- Primeira linha: nomes das colunas
+- Demais linhas: os exemplos
+- A ÚLTIMA coluna é a classe (o que queremos prever)
+- Todos os valores são categorias (texto) e nenhuma célula pode ficar vazia
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,28 +13,26 @@
 
 #define MAX_EXEMPLOS 1000
 #define MAX_COLUNAS  10
-#define MAX_VALORES  10      /* máximo de valores distintos por coluna */
+#define MAX_VALORES  10      // Máximo de valores distintos por coluna */
 #define TAM_TEXTO    30
 
-/* ---------------- Dados (preenchidos a partir do CSV) ---------------- */
+// Dados (preenchidos a partir do CSV)
 char nomes_colunas[MAX_COLUNAS][TAM_TEXTO];
 char tabela[MAX_EXEMPLOS][MAX_COLUNAS][TAM_TEXTO];
 int numero_exemplos = 0;
-int numero_atributos = 0;     /* colunas sem contar a classe */
-int coluna_classe = 0;        /* índice da última coluna */
+int numero_atributos = 0; // Colunas sem contar a classe */
+int coluna_classe = 0; // Índice da última coluna */
 
-/* ---------------- Árvore ---------------- */
 typedef struct No {
-    int coluna;                              /* atributo testado (-1 se for folha) */
-    char classe[TAM_TEXTO];                  /* classe prevista (usada nas folhas) */
+    int coluna; // Atributo testado (-1 se for folha)
+    char classe[TAM_TEXTO]; // Classe prevista (usada nas folhas)
     int quantidade_filhos;
-    char valores[MAX_VALORES][TAM_TEXTO];    /* valores possíveis do atributo */
-    struct No *filhos[MAX_VALORES];          /* filhos[i] corresponde a valores[i] */
+    char valores[MAX_VALORES][TAM_TEXTO]; // Valores possíveis do atributo
+    struct No *filhos[MAX_VALORES]; // Filhos[i] corresponde a valores[i]
 } No;
 
-/* ---------------- Leitura do CSV ---------------- */
-
-/* Tira espaços e quebras de linha das pontas; retorna o início do texto limpo */
+// Leitura do CSV
+// Tira espaços e quebras de linha das pontas; retorna o início do texto limpo
 char *limpar_texto(char *texto) {
     while (*texto == ' ' || *texto == '\t') texto++;
     int tamanho = strlen(texto);
@@ -49,7 +42,7 @@ char *limpar_texto(char *texto) {
     return texto;
 }
 
-/* Separa a linha pelas vírgulas e guarda cada campo em 'campos'; retorna quantos */
+// Separa a linha pelas vírgulas e guarda cada campo em 'campos'; retorna quantos
 int dividir_linha(char *linha, char campos[][TAM_TEXTO]) {
     int quantidade = 0;
     char *pedaco = strtok(linha, ",");
@@ -62,7 +55,7 @@ int dividir_linha(char *linha, char campos[][TAM_TEXTO]) {
     return quantidade;
 }
 
-/* Lê o arquivo para 'nomes_colunas' e 'tabela'; retorna 1 se deu certo */
+// Lê o arquivo para 'nomes_colunas' e 'tabela'; retorna 1 se deu certo
 int carregar_csv(const char *nome_arquivo) {
     FILE *arquivo = fopen(nome_arquivo, "r");
     if (arquivo == NULL) return 0;
@@ -71,7 +64,7 @@ int carregar_csv(const char *nome_arquivo) {
     int lendo_cabecalho = 1;
 
     while (fgets(linha, sizeof(linha), arquivo) != NULL && numero_exemplos < MAX_EXEMPLOS) {
-        if (strlen(limpar_texto(linha)) == 0) continue;     /* ignora linhas vazias */
+        if (strlen(limpar_texto(linha)) == 0) continue;     // Ignora linhas vazias
 
         if (lendo_cabecalho) {
             int colunas = dividir_linha(linha, nomes_colunas);
@@ -87,9 +80,9 @@ int carregar_csv(const char *nome_arquivo) {
     return numero_exemplos > 0 && numero_atributos > 0;
 }
 
-/* ---------------- Funções auxiliares ---------------- */
+// Funções auxiliares
 
-/* Preenche 'valores' com os valores distintos da coluna e retorna a quantidade */
+// Preenche 'valores' com os valores distintos da coluna e retorna a quantidade
 int listar_valores(int coluna, char valores[][TAM_TEXTO]) {
     int quantidade = 0;
     for (int i = 0; i < numero_exemplos; i++) {
@@ -108,7 +101,7 @@ int listar_valores(int coluna, char valores[][TAM_TEXTO]) {
     return quantidade;
 }
 
-/* Copia para 'saida' os exemplos cuja coluna tem o valor dado; retorna quantos */
+// Copia para 'saida' os exemplos cuja coluna tem o valor dado; retorna quantos
 int filtrar_exemplos(int exemplos[], int quantidade, int coluna, const char *valor, int saida[]) {
     int total = 0;
     for (int i = 0; i < quantidade; i++)
@@ -117,9 +110,9 @@ int filtrar_exemplos(int exemplos[], int quantidade, int coluna, const char *val
     return total;
 }
 
-/* ---------------- Entropia e ganho ---------------- */
+// Entropia e ganho
 
-/* H(S) = - soma( p * log2(p) ) para cada classe */
+// H(S) = - soma( p * log2(p) ) para cada classe
 double calcular_entropia(int exemplos[], int quantidade) {
     char classes[MAX_VALORES][TAM_TEXTO];
     int numero_classes = listar_valores(coluna_classe, classes);
@@ -136,7 +129,7 @@ double calcular_entropia(int exemplos[], int quantidade) {
     return entropia;
 }
 
-/* Ganho = entropia antes da divisão - média ponderada da entropia depois */
+// Ganho = entropia antes da divisão - média ponderada da entropia depois
 double calcular_ganho(int exemplos[], int quantidade, int coluna) {
     char valores[MAX_VALORES][TAM_TEXTO];
     int numero_valores = listar_valores(coluna, valores);
@@ -151,7 +144,7 @@ double calcular_ganho(int exemplos[], int quantidade, int coluna) {
     return calcular_entropia(exemplos, quantidade) - entropia_depois;
 }
 
-/* Devolve a classe que mais aparece nos exemplos (copiada para 'resultado') */
+// Devolve a classe que mais aparece nos exemplos (copiada para 'resultado')
 void classe_majoritaria(int exemplos[], int quantidade, char resultado[]) {
     char classes[MAX_VALORES][TAM_TEXTO];
     int numero_classes = listar_valores(coluna_classe, classes);
@@ -167,7 +160,7 @@ void classe_majoritaria(int exemplos[], int quantidade, char resultado[]) {
     }
 }
 
-/* ---------------- Construção (ID3) ---------------- */
+// Construção (ID3)
 
 No *criar_no(void) {
     No *no = calloc(1, sizeof(No));
@@ -180,10 +173,10 @@ No *construir_arvore(int exemplos[], int quantidade, int atributo_usado[]) {
     No *no = criar_no();
     classe_majoritaria(exemplos, quantidade, no->classe);
 
-    /* Caso base 1: todos os exemplos têm a mesma classe */
+    // Caso base 1: todos os exemplos têm a mesma classe
     if (calcular_entropia(exemplos, quantidade) == 0.0) return no;
 
-    /* Escolhe o atributo com maior ganho de informação */
+    // Escolhe o atributo com maior ganho de informação
     int melhor_atributo = -1;
     double maior_ganho = 0.0;
     for (int a = 0; a < numero_atributos; a++) {
@@ -195,7 +188,7 @@ No *construir_arvore(int exemplos[], int quantidade, int atributo_usado[]) {
         }
     }
 
-    /* Caso base 2: nenhum atributo ajuda mais */
+    // Caso base 2: nenhum atributo ajuda mais
     if (melhor_atributo == -1) return no;
 
     no->coluna = melhor_atributo;
@@ -206,7 +199,7 @@ No *construir_arvore(int exemplos[], int quantidade, int atributo_usado[]) {
         int subconjunto[MAX_EXEMPLOS];
         int tamanho = filtrar_exemplos(exemplos, quantidade, melhor_atributo, no->valores[v], subconjunto);
 
-        if (tamanho == 0) {   /* valor sem exemplos: folha com a classe majoritária do pai */
+        if (tamanho == 0) {   // Valor sem exemplos: folha com a classe majoritária do pai
             no->filhos[v] = criar_no();
             strcpy(no->filhos[v]->classe, no->classe);
         } else {
@@ -214,13 +207,13 @@ No *construir_arvore(int exemplos[], int quantidade, int atributo_usado[]) {
         }
     }
 
-    atributo_usado[melhor_atributo] = 0;   /* libera o atributo para outros ramos */
+    atributo_usado[melhor_atributo] = 0;   // Libera o atributo para outros ramos
     return no;
 }
 
-/* ---------------- Uso da árvore ---------------- */
+// Uso da árvore
 
-/* Desce pela árvore seguindo os valores do exemplo até chegar a uma folha */
+// Desce pela árvore seguindo os valores do exemplo até chegar a uma folha
 const char *classificar(No *no, char exemplo[][TAM_TEXTO]) {
     while (no->coluna != -1) {
         No *proximo = NULL;
@@ -252,7 +245,7 @@ void liberar_arvore(No *no) {
     free(no);
 }
 
-/* Pergunta o valor de cada atributo; retorna 0 se o usuário digitar linha vazia */
+// Pergunta o valor de cada atributo; retorna 0 se o usuário digitar linha vazia
 int ler_novo_exemplo(char exemplo[][TAM_TEXTO]) {
     char entrada[100];
     for (int a = 0; a < numero_atributos; a++) {
@@ -266,7 +259,7 @@ int ler_novo_exemplo(char exemplo[][TAM_TEXTO]) {
     return 1;
 }
 
-/* ---------------- main ---------------- */
+// Main
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Uso: %s arquivo.csv\n", argv[0]);
@@ -293,13 +286,13 @@ int main(int argc, char *argv[]) {
     printf("\nArvore de decisao:\n");
     imprimir_arvore(raiz, 0);
 
-    /* Testa a árvore nos próprios exemplos de treino */
+    // Testa a árvore nos próprios exemplos de treino
     int acertos = 0;
     for (int i = 0; i < numero_exemplos; i++)
         if (strcmp(classificar(raiz, tabela[i]), tabela[i][coluna_classe]) == 0) acertos++;
     printf("\nAcuracia no treino: %d/%d\n", acertos, numero_exemplos);
 
-    /* Classifica exemplos novos digitados pelo usuário */
+    // Classifica exemplos novos digitados pelo usuário
     printf("\nClassificar novo exemplo (deixe vazio para sair):\n");
     char novo_exemplo[MAX_COLUNAS][TAM_TEXTO];
     while (ler_novo_exemplo(novo_exemplo))

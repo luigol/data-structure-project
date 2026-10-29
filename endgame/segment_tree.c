@@ -89,6 +89,8 @@ int main() {
     // 1) Build the tree from the array
     sum_build(1, 0, N - 1);
 
+    printf("Soma e máximo certos");
+
     printf("Array: ");
     print_array();
 
